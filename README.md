@@ -70,7 +70,7 @@ weight_decay: 0.0005
 warmup_epochs: 3
 warmup_momentum: 0.8
 ```
-![Training Results -1](models/train/vesselimg_nano_obb7/results.png)
+![Training Results](outputs/results.png)
 
 
 ## Part 3: ONNX Export and TensorRT INT8 Quantization
