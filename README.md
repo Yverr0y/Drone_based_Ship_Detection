@@ -56,15 +56,11 @@ The result is a pipeline that can train a vessel detector, export it to TensorRT
 ### 2.2 Training Configuration
 
 ```python
-# configs/train.yaml
-# YOLOv8 training hyperparameters for VESSELimg
-
 # Core
 epochs: 200
 imgsz: 640              # standard; try 1024 if GPU memory allows
 batch: 16               # for 11GB+ VRAM; reduce to 8 for smaller GPUs
 device: 0               # GPU index
-
 # Optimizer
 optimizer: AdamW
 lr0: 0.001              # initial learning rate
@@ -73,39 +69,9 @@ momentum: 0.937
 weight_decay: 0.0005
 warmup_epochs: 3
 warmup_momentum: 0.8
-
-# Data augmentation — critical for aerial imagery
-hsv_h: 0.015            # hue variation (maritime colours)
-hsv_s: 0.7              # saturation
-hsv_v: 0.4              # value/brightness (clouds, shadows)
-degrees: 180.0          # ← KEY: full rotation augmentation for aerial OBB
-translate: 0.1
-scale: 0.5              # simulate altitude variation
-shear: 0.0
-perspective: 0.0001     # slight perspective distortion (camera tilt)
-flipud: 0.5             # vertical flip (aerial = no preferred orientation)
-fliplr: 0.5
-mosaic: 1.0             # mosaic augmentation: vital for dense scenes
-mixup: 0.1
-copy_paste: 0.0
-
-# Class weighting to handle imbalance
-cls: 0.5                # classification loss weight
-box: 7.5                # regression loss weight (higher = tighter boxes)
-dfl: 1.5                # distribution focal loss
-
-# Saving & logging
-save: true
-save_period: 10
-project: models/train
-name: vesselimg_nano_obb
-exist_ok: false
-pretrained: true        # use COCO pretrained weights
-
-# Validation
-val: true
-plots: true
 ```
+![Training Results -1](models/train/vesselimg_nano_obb7/results.png)
+
 
 ## Part 3: ONNX Export and TensorRT INT8 Quantization
 
