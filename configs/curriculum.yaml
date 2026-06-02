@@ -1,0 +1,257 @@
+# Curriculum training configuration for VESSELimg YOLOv8n OBB.
+#
+# The schedule intentionally ramps difficulty over short segments:
+# 1. learn the coarse vessel manifold on clean/mild data,
+# 2. increase OBB geometry pressure and moderate transforms,
+# 3. expose the model to the full aerial deployment distribution,
+# 4. finish on a cleaner distribution for sharper boxes and confidence.
+
+dataset_config: configs/vessel.yaml
+
+model:
+  # The script first checks local candidates, then falls back to the Ultralytics
+  # model name so the checkpoint can be downloaded by Ultralytics if absent.
+  weights: yolov8n-obb.pt
+  local_candidates:
+    - src/model/yolov8n-obb.pt
+    - yolov8n-obb.pt
+
+output:
+  project: models/train
+  name: vesselimg_nano_obb_curriculum
+  exist_ok: false
+  summary_dir: models/train/curriculum_summaries
+
+training:
+  total_epochs: 120
+  segment_epochs: 5
+  carry_weights: best
+
+  device: 0
+  batch: 24
+  workers: 8
+  seed: 42
+  deterministic: true
+  amp: false
+  cache: false
+
+  optimizer: AdamW
+  lr0: 0.001
+  lrf: 0.02
+  momentum: 0.937
+  weight_decay: 0.0007
+  warmup_epochs: 3.0
+  warmup_momentum: 0.8
+  cos_lr: true
+  patience: 40
+
+  save: true
+  save_period: 10
+  val: true
+  plots: true
+
+  # OBB loss weighting. These are overridden gradually by phase endpoints.
+  box: 7.5
+  cls: 0.75
+  dfl: 1.5
+
+  # Static switches that should remain stable.
+  rect: false
+  single_cls: false
+  overlap_mask: true
+  mask_ratio: 4
+
+imbalance:
+  balanced_sampling:
+    enabled: true
+    # repeat factor = (max_class_count / class_count) ** exponent
+    # clipped to [1, max_repeat]. sqrt weighting avoids extreme oversampling.
+    exponent: 0.5
+    max_repeat: 6
+    include_empty: true
+
+validation:
+  run_final_val: true
+  run_final_test: true
+
+curriculum:
+  phases:
+    - key: manifold
+      title: Coarse vessel manifold
+      epochs: 20
+      rationale: >
+        Start easy: let YOLOv8n learn vessel/background separation and broad
+        class cues before heavy OBB geometry and unrealistic composites.
+      start:
+        imgsz: 640
+        degrees: 0.0
+        translate: 0.03
+        scale: 0.15
+        shear: 0.0
+        perspective: 0.0
+        flipud: 0.0
+        fliplr: 0.5
+        hsv_h: 0.005
+        hsv_s: 0.25
+        hsv_v: 0.15
+        mosaic: 0.0
+        mixup: 0.0
+        copy_paste: 0.0
+        box: 6.0
+        cls: 0.9
+        dfl: 1.2
+        freeze: 10
+      end:
+        imgsz: 640
+        degrees: 30.0
+        translate: 0.06
+        scale: 0.25
+        shear: 0.0
+        perspective: 0.00002
+        flipud: 0.15
+        fliplr: 0.5
+        hsv_h: 0.01
+        hsv_s: 0.35
+        hsv_v: 0.2
+        mosaic: 0.15
+        mixup: 0.0
+        copy_paste: 0.0
+        box: 7.0
+        cls: 0.85
+        dfl: 1.35
+        freeze: 0
+
+    - key: geometry
+      title: OBB geometry and moderate robustness
+      epochs: 35
+      rationale: >
+        Increase rotation, scale, translation, and box pressure so the model
+        learns oriented localization without the full augmentation burden yet.
+      start:
+        imgsz: 640
+        degrees: 30.0
+        translate: 0.06
+        scale: 0.25
+        shear: 0.0
+        perspective: 0.00002
+        flipud: 0.15
+        fliplr: 0.5
+        hsv_h: 0.01
+        hsv_s: 0.35
+        hsv_v: 0.2
+        mosaic: 0.15
+        mixup: 0.0
+        copy_paste: 0.0
+        box: 7.0
+        cls: 0.85
+        dfl: 1.35
+        freeze: 0
+      end:
+        imgsz: 704
+        degrees: 110.0
+        translate: 0.10
+        scale: 0.45
+        shear: 0.0
+        perspective: 0.00008
+        flipud: 0.45
+        fliplr: 0.5
+        hsv_h: 0.015
+        hsv_s: 0.55
+        hsv_v: 0.35
+        mosaic: 0.65
+        mixup: 0.05
+        copy_paste: 0.0
+        box: 8.0
+        cls: 0.75
+        dfl: 1.6
+        freeze: 0
+
+    - key: deployment
+      title: Full aerial deployment distribution
+      epochs: 45
+      rationale: >
+        Train under the hardest realistic distribution: full aerial rotations,
+        strong scale changes, flips, color variation, mosaic, and mild mixup.
+      start:
+        imgsz: 704
+        degrees: 110.0
+        translate: 0.10
+        scale: 0.45
+        shear: 0.0
+        perspective: 0.00008
+        flipud: 0.45
+        fliplr: 0.5
+        hsv_h: 0.015
+        hsv_s: 0.55
+        hsv_v: 0.35
+        mosaic: 0.65
+        mixup: 0.05
+        copy_paste: 0.0
+        box: 8.0
+        cls: 0.75
+        dfl: 1.6
+        freeze: 0
+      end:
+        imgsz: 768
+        degrees: 180.0
+        translate: 0.12
+        scale: 0.60
+        shear: 0.0
+        perspective: 0.00012
+        flipud: 0.5
+        fliplr: 0.5
+        hsv_h: 0.02
+        hsv_s: 0.70
+        hsv_v: 0.45
+        mosaic: 1.0
+        mixup: 0.10
+        copy_paste: 0.0
+        box: 8.5
+        cls: 0.70
+        dfl: 1.7
+        freeze: 0
+
+    - key: clean_finetune
+      title: Clean localization and calibration finish
+      epochs: 20
+      rationale: >
+        Lower augmentation after robustness training so validation-like images
+        sharpen OBB localization, class confidence, and calibration.
+      start:
+        imgsz: 768
+        degrees: 60.0
+        translate: 0.06
+        scale: 0.25
+        shear: 0.0
+        perspective: 0.00002
+        flipud: 0.2
+        fliplr: 0.5
+        hsv_h: 0.01
+        hsv_s: 0.35
+        hsv_v: 0.20
+        mosaic: 0.20
+        mixup: 0.0
+        copy_paste: 0.0
+        box: 8.0
+        cls: 0.65
+        dfl: 1.6
+        freeze: 0
+      end:
+        imgsz: 768
+        degrees: 15.0
+        translate: 0.02
+        scale: 0.10
+        shear: 0.0
+        perspective: 0.0
+        flipud: 0.0
+        fliplr: 0.5
+        hsv_h: 0.005
+        hsv_s: 0.15
+        hsv_v: 0.10
+        mosaic: 0.0
+        mixup: 0.0
+        copy_paste: 0.0
+        box: 7.5
+        cls: 0.60
+        dfl: 1.5
+        freeze: 0

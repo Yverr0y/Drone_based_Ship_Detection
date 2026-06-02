@@ -1,0 +1,13 @@
+path: data/raw               # root directory
+train: train/images
+val: valid/images
+test: test/images
+
+nc: 6
+names:
+  0: cargo
+  1: military
+  2: carrier
+  3: cruise
+  4: tanker
+  5: ferry

@@ -1,0 +1,39 @@
+# Local assistant state
+.codex
+
+# Project notes
+vessel_tracking_guide.md
+
+# Python caches
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Editor and OS noise
+.DS_Store
+.idea/
+.vscode/
+
+# Logs and local databases
+*.log
+mlflow.db
+src/model/mlflow.db
+src/model/mlruns/
+
+# Datasets and generated analysis
+data/
+
+# Model artifacts and exports
+models/
+*.pt
+*.pth
+*.onnx
+*.engine
+*.cache
+
+# Runtime outputs
+outputs/
