@@ -1,16 +1,9 @@
 # Aerial Maritime Vessel Intelligence and Tracking
 
-This repository contains an end-to-end computer vision workflow for aerial maritime surveillance. The project is focused on detecting vessels from drone or elevated camera footage, classifying them by type, and maintaining persistent tracks across video frames.
+This repository contains the computer vision pipeline for aerial maritime surveillance. The project is focused on detecting vessels from drone or elevated camera footage, classifying them by type, and maintaining persistent tracks across video frames. 
 
-The current codebase is organized around a modern oriented-bounding-box pipeline:
-
-- YOLOv8 OBB training for rotated vessel detection
-- curriculum-based training for staged optimization and imbalance handling
-- TensorRT export and low-latency inference for deployment
-- DeepSORT-style multi-object tracking adapted for oriented bounding boxes
-- video pipeline tooling for annotated output and per-track event logs
-
-The older `Ship_Detection/` and `Object_Tracking/` directories are preserved because they already existed on the remote branch. The actively maintained project code introduced in this repository lives under `src/` and `configs/`.
+**Project Stack:** YOLOv8-nano, TensorRT INT8, DeepSORT, Jetson Orin Nano,  MAVLink 
+**Dataset:** VESSELimg (6,234 aerial images, 6 classes, OBB annotations)  
 
 ## Project Goals
 
@@ -18,158 +11,190 @@ The system is intended for maritime monitoring scenarios where a fixed-axis dete
 
 - vessels appear at arbitrary headings and aspect ratios
 - drone footage contains camera motion, scale changes, and long-range targets
-- downstream tracking benefits from rotation-aware geometry instead of axis-aligned boxes
-- deployment requires a path from training to optimized inference on GPU hardware
 
 The result is a pipeline that can train a vessel detector, export it to TensorRT, run real-time inference on video, and associate detections into stable track identities.
 
-## Core Capabilities
+## 1 System Overview
 
-### 1. Oriented vessel detection
-
-The detector is trained as a YOLOv8 oriented bounding box model. Instead of standard axis-aligned boxes, each detection includes rotated geometry, which is better suited for ships viewed from aerial imagery where heading matters.
-
-The dataset configuration in [`configs/vessel.yaml`](/home/acer/workspace/projects/amvit/configs/vessel.yaml:1) defines six vessel classes:
-
-- `cargo`
-- `military`
-- `carrier`
-- `cruise`
-- `tanker`
-- `ferry`
-
-### 2. Standard and curriculum training
-
-The training code in [`src/model/train.py`](/home/acer/workspace/projects/amvit/src/model/train.py:1) handles conventional YOLOv8 OBB training with MLflow logging. It resolves dataset paths, loads training hyperparameters from YAML, and logs metrics and run artifacts for experiment tracking.
-
-The curriculum pipeline in [`src/model/train_curriculum.py`](/home/acer/workspace/projects/amvit/src/model/train_curriculum.py:1) extends this with:
-
-- staged training segments
-- interpolated hyperparameters across phases
-- optional balanced sampling for class imbalance
-- structured summaries for curriculum segments and dataset composition
-
-This makes it easier to train progressively across easier and harder regimes instead of relying on a single static training schedule.
-
-### 3. TensorRT deployment path
-
-The inference wrapper in [`src/model/trt_infer.py`](/home/acer/workspace/projects/amvit/src/model/trt_infer.py:1) loads a serialized TensorRT engine and runs low-latency OBB inference on GPU. It includes:
-
-- TensorRT engine loading
-- PyCUDA-backed buffer management
-- letterbox preprocessing
-- OBB output decoding
-- class-name loading from dataset config
-
-This is the runtime path used for deployment-oriented detection rather than research-only evaluation.
-
-### 4. Oriented multi-object tracking
-
-Tracking is implemented in [`src/tracking/deepsort.py`](/home/acer/workspace/projects/amvit/src/tracking/deepsort.py:1) and supporting geometry/filter modules under `src/tracking/`. The tracker combines:
-
-- rotation-aware Kalman filtering
-- OBB IoU-based association
-- optional appearance embeddings
-- a deterministic color-histogram fallback when deep ReID features are unavailable
-
-This allows track management that respects vessel orientation and visual similarity, improving stability compared with axis-aligned tracking logic.
-
-### 5. Video pipeline and logging
-
-The main demo/integration script is [`src/pipeline_1.py`](/home/acer/workspace/projects/amvit/src/pipeline_1.py:1). It ties together:
-
-- TensorRT detector loading
-- OBB DeepSORT tracking
-- frame-by-frame annotation
-- track trails and per-object overlays
-- JSONL track logging
-- output video generation
-
-By default it reads a test video from `data/video/`, writes annotated video to `outputs/`, and can save serialized tracking records for later analysis.
-
-## Repository Structure
-
-```text
-.
-├── configs/
-│   ├── vessel.yaml          # dataset and class configuration
-│   ├── train.yaml           # base training configuration
-│   └── curriculum.yaml      # staged curriculum training configuration
-├── src/
-│   ├── pipeline_1.py        # end-to-end detection + tracking video pipeline
-│   ├── data/                # dataset utilities, augmentation, inspection
-│   ├── model/               # training, export, TensorRT inference, analysis
-│   └── tracking/            # OBB geometry, Kalman filter, DeepSORT tracker
-├── data/                    # local datasets and videos, ignored by git
-├── models/                  # local weights, engines, exports, ignored by git
-├── outputs/                 # runtime outputs, ignored by git
-├── Ship_Detection/          # legacy remote branch content
-└── Object_Tracking/         # legacy remote branch content
+```
+[Aerial Camera / Video Stream]
+         ↓
+[YOLOv8n-OBB TensorRT INT8 Engine]  ← runs on Jetson Orin Nano
+         ↓
+[DeepSORT Tracker]  ← assigns persistent IDs
+         ↓
+[Target Selection Logic]  ← picks primary vessel to track
+         ↓
+[Error Computation: pixel offset from frame center]
+         ↓
+[PID Controller]  ← pan + tilt channels
+         ↓
+[MAVLink Gimbal Protocol v2]  ← sends GIMBAL_DEVICE_SET_ATTITUDE
+         ↓
+[Gimbal Motors]  ← keeps vessel in frame center
 ```
 
-## Configuration and Data Layout
+---
 
-The active dataset configuration expects a YOLO-style layout rooted at `data/raw`:
+## Part 2: Model Architecture and Training
 
-```text
-data/raw/
-├── train/
-│   ├── images/
-│   └── labels/
-├── valid/
-│   ├── images/
-│   └── labels/
-└── test/
-    ├── images/
-    └── labels/
+### 2.1 YOLOv8-nano OBB — Architecture Rationale
+
+`yolov8n-obb` is YOLOv8's nano variant adapted for Oriented Bounding Box detection. Key architectural changes vs. standard YOLOv8:
+
+- **Detection head outputs 5+nc values per anchor:** `(x, y, w, h, θ, cls_0 ... cls_n)` where θ is the rotation angle
+- **Rotated NMS:** suppresses overlapping OBBs using IoU computed over rotated polygons (more expensive than standard NMS — factor this into latency budget)
+- **Loss function:** uses RotatedIoULoss on the regression branch, CIoU equivalent for OBB
+
+**Why nano?** Three reasons:
+1. Jetson Orin Nano has 8GB shared memory — nano fits with headroom for tracking
+2. Target is real-time (≥15 FPS) — larger models can't hit this
+3. mAP50-95 = 0.75 is achievable with nano given the relatively constrained 6-class problem
+
+**Parameter count:** ~3.1M parameters for yolov8n-obb vs. ~11M for yolov8s-obb. On INT8 Jetson inference, this translates to roughly 2× faster throughput.
+
+### 2.2 Training Configuration
+
+```python
+# configs/train.yaml
+# YOLOv8 training hyperparameters for VESSELimg
+
+# Core
+epochs: 200
+imgsz: 640              # standard; try 1024 if GPU memory allows
+batch: 16               # for 11GB+ VRAM; reduce to 8 for smaller GPUs
+device: 0               # GPU index
+
+# Optimizer
+optimizer: AdamW
+lr0: 0.001              # initial learning rate
+lrf: 0.01               # final LR = lr0 * lrf
+momentum: 0.937
+weight_decay: 0.0005
+warmup_epochs: 3
+warmup_momentum: 0.8
+
+# Data augmentation — critical for aerial imagery
+hsv_h: 0.015            # hue variation (maritime colours)
+hsv_s: 0.7              # saturation
+hsv_v: 0.4              # value/brightness (clouds, shadows)
+degrees: 180.0          # ← KEY: full rotation augmentation for aerial OBB
+translate: 0.1
+scale: 0.5              # simulate altitude variation
+shear: 0.0
+perspective: 0.0001     # slight perspective distortion (camera tilt)
+flipud: 0.5             # vertical flip (aerial = no preferred orientation)
+fliplr: 0.5
+mosaic: 1.0             # mosaic augmentation: vital for dense scenes
+mixup: 0.1
+copy_paste: 0.0
+
+# Class weighting to handle imbalance
+cls: 0.5                # classification loss weight
+box: 7.5                # regression loss weight (higher = tighter boxes)
+dfl: 1.5                # distribution focal loss
+
+# Saving & logging
+save: true
+save_period: 10
+project: models/train
+name: vesselimg_nano_obb
+exist_ok: false
+pretrained: true        # use COCO pretrained weights
+
+# Validation
+val: true
+plots: true
 ```
 
-The codebase intentionally keeps large data, trained weights, TensorRT engines, videos, and generated outputs outside version control. Those paths are covered in [`.gitignore`](/home/acer/workspace/projects/amvit/.gitignore:1).
+## Part 3: ONNX Export and TensorRT INT8 Quantization
 
-## Typical Workflow
+###  INT8 Calibration Engine
 
-### Train a detector
+INT8 quantization maps 32-bit float activations → 8-bit integers. The key is finding the right *scale factor* for each layer's activation range. TensorRT does this via **entropy calibration** over your calibration dataset.
 
-Use the training scripts under `src/model/` to fit an oriented vessel detector using the dataset described in `configs/vessel.yaml` and the hyperparameters in `configs/train.yaml`.
+**Why INT8 over FP16?** On Jetson Orin Nano's DLA (Deep Learning Accelerator), INT8 is ~4× faster than FP16 and ~8× faster than FP32. The Orin Nano has 40 TOPS of INT8 throughput vs ~10 TOPS FP16.
 
-### Run curriculum experiments
+## Part 4: DeepSORT Tracker Integration
 
-Use `src/model/train_curriculum.py` when you want phase-based training, interpolation of augmentation settings, or class-balancing experiments.
+### 4.1 DeepSORT Algorithm — How It Works
 
-### Export and optimize
+DeepSORT extends SORT (Simple Online and Realtime Tracking) by adding a deep appearance feature extractor to the Kalman Filter + Hungarian Algorithm pipeline.
 
-Use the model export and TensorRT tooling under `src/model/` to produce optimized inference assets for deployment on NVIDIA hardware.
+```
+Detection t     →    [Feature Extractor]    →  Appearance features
+Detection t     →    [Bounding box]
+                                              ↘
+                                           [Hungarian Assignment]  ←  Kalman Predictions
+                                              ↙
+                                       Track updates
+                                    (confirmed / tentative)
+```
 
-### Run video tracking
+The Kalman Filter models each track's state as:
+```
+state = [x, y, a, h, ẋ, ẏ, ȧ, ḣ]
+where: a = aspect ratio, h = height, dots = velocities
+```
 
-Use `src/pipeline_1.py` to execute the full detection-and-tracking pipeline on a video source and generate:
+**For OBB, we need to extend this state to include rotation:**
+```
+state = [x, y, w, h, θ, ẋ, ẏ, ẇ, ḣ, θ̇]
+```
 
-- annotated output video
-- per-frame tracking logs
-- basic runtime statistics such as detection count, track count, and processing FPS
+## Part 5: Target Selection and Error Computation
 
-## Dependencies
+Before PID control, you need to select which vessel to track (if multiple are detected) and compute the pixel error for the gimbal controller.
+The PID controller converts pixel error into gimbal velocity or position commands.
 
-The code references the following major libraries and runtimes:
+```
+Error (pixels)  →  [PID]  →  Rate command (deg/s)  →  [Gimbal]  →  Camera moves
+     ↑                                                                     |
+     └────────────────────── [New frame / new centroid] ──────────────────┘
+```
 
-- Python 3
-- OpenCV
-- NumPy
-- Ultralytics YOLO
-- MLflow
-- PyYAML
-- SciPy
-- PyCUDA
-- TensorRT
+**Tuning intuition:**
+- **Kp (proportional):** Drives toward target. Too high → oscillation. Too low → sluggish.
+- **Ki (integral):** Eliminates steady-state error (e.g., wind on gimbal). Too high → windup.
+- **Kd (derivative):** Damps oscillation by responding to rate of change. Too high → noise amplified.
 
-Some deployment features, especially TensorRT inference, require a correctly configured NVIDIA CUDA environment.
+For a camera gimbal tracking a slow-moving maritime vessel, a PD controller (Ki=0) with low gains often suffices.
+MAVLink (Micro Air Vehicle Link) is the lightweight binary communication protocol used in all major open-source autopilots (PX4, ArduPilot). It runs over UART, UDP, or USB.
 
-## Notes
+**Connection topology:**
+```
+Jetson Orin Nano ──UART/USB──→ PX4/ArduPilot ──UAVCAN/PWM──→ Gimbal
+      (companion)                (flight controller)           (motors)
+```
 
-- The repository currently mixes preserved legacy content with the newer `src/` pipeline. The new code should be treated as the active path for further development.
-- Large assets such as datasets, `.pt` weights, `.onnx` exports, `.engine` files, MLflow state, and runtime outputs are intentionally not committed.
-- The project is structured to support both experimentation and deployment, not just offline notebook-style training.
+**Outputs:**
 
-## Status
+![Test Output -1](outputs/trt_infer4.jpg) 
+![Test Output -2](outputs/trt_infer2.jpg)
 
-This repository is actively evolving from earlier ship detection and tracking experiments into a cleaner, deployment-oriented aerial maritime surveillance stack built around oriented detection and tracking.
+| Metric | Target |
+|---|---|---|
+| P50 latency (detection) | < 20ms |
+| P95 latency (detection) | < 30ms |
+| End-to-end FPS (det + track) | ≥ 15 FPS |
+| Board power (MAXN) | < 10W |
+| Model size (engine) | ~3MB | 
+| mAP50-95 (test set) | ≥ 0.75 | 
+
+### File Execution Order
+
+```bash
+
+python src/data/download.py
+
+python src/data/augment.py
+python src/data/calibration_dataset.py
+
+python src/model/train.py
+
+python src/model/export.py
+
+python src/model/trt_builder.py
+
+python src/pipeline.py --engine models/trt/vessel_int8.engine --source 0
+```
